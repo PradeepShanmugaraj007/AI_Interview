@@ -17,6 +17,7 @@ def _env(key: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    groq_api_key: str = field(default_factory=lambda: _env("GROQ_API_KEY"))
     anthropic_api_key: str = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     deepgram_api_key: str = field(default_factory=lambda: _env("DEEPGRAM_API_KEY"))
     elevenlabs_api_key: str = field(default_factory=lambda: _env("ELEVENLABS_API_KEY"))
@@ -29,7 +30,9 @@ class Settings:
 
     public_host: str = field(default_factory=lambda: _env("PUBLIC_HOST"))
 
-    model: str = field(default_factory=lambda: _env("ANTHROPIC_MODEL", "claude-opus-4-8"))
+    model: str = field(
+        default_factory=lambda: _env("GROQ_MODEL", _env("ANTHROPIC_MODEL", "openai/gpt-oss-120b"))
+    )
     # Voice turns must be quick enough to feel conversational. These are
     # monitoring thresholds, not an attempt to truncate a candidate.
     turn_budget_ms: int = 1500
@@ -54,7 +57,7 @@ class Settings:
 
     def missing(self) -> list[str]:
         required = {
-            "ANTHROPIC_API_KEY": self.anthropic_api_key,
+            "GROQ_API_KEY": self.groq_api_key or self.anthropic_api_key,
             "DEEPGRAM_API_KEY": self.deepgram_api_key,
             "ELEVENLABS_API_KEY": self.elevenlabs_api_key,
             "TWILIO_ACCOUNT_SID": self.twilio_account_sid,

@@ -42,11 +42,15 @@ def render_turn(profile: InterviewProfile, candidate_said: str) -> str:
     active = profile.active_question
     parts = [f'Candidate just said: "{candidate_said}"', ""]
     if not profile.transcription_consent:
+        first_q = profile.plan.questions[0].prompt if profile.plan.questions else "Could you summarize your experience?"
         parts.extend(
             [
-                "The candidate has not yet given verbal consent to transcription.",
-                "State that you are an AI interviewer and ask whether they consent to having interview answers transcribed for recruiter review.",
-                "Set transcription_consent true only for a clear yes. Do not score an answer yet.",
+                "The candidate was just asked for verbal consent to transcription.",
+                "If the candidate clearly consents (e.g. 'yes', 'sure', 'agree', 'I consent', 'proceed'), set transcription_consent to true, thank them, and ask the first planned question:",
+                first_q,
+                "If the candidate declines or asks to stop, acknowledge politely and set candidate_requested_stop to true and should_end_call to true.",
+                "If unclear, politely ask again for consent to transcribe answers before proceeding.",
+                "Set answer_assessment.final to false; there is no answer to score yet.",
             ]
         )
     elif active is None and not profile.finished_questions:

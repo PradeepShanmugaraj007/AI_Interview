@@ -9,6 +9,12 @@ from typing import Any
 
 from anthropic import APIError, AsyncAnthropic
 
+try:
+    from groq import AsyncGroq, APIError as GroqAPIError
+except ImportError:
+    AsyncGroq = None  # type: ignore[assignment]
+    GroqAPIError = Exception  # type: ignore[assignment]
+
 from ..config import settings
 from . import prompts
 from .models import InterviewProfile
@@ -46,7 +52,12 @@ TURN_SCHEMA: dict[str, Any] = {
 
 class InterviewTurnEngine:
     def __init__(self, profile: InterviewProfile) -> None:
-        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        if settings.groq_api_key and AsyncGroq is not None:
+            self._use_groq = True
+            self._client = AsyncGroq(api_key=settings.groq_api_key)
+        else:
+            self._use_groq = False
+            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
         self._profile = profile
         self._system = prompts.system_prompt(profile)
         self._history: list[dict[str, str]] = []
@@ -54,11 +65,14 @@ class InterviewTurnEngine:
     async def take_turn(self, candidate_said: str) -> dict[str, Any]:
         user_turn = prompts.render_turn(self._profile, candidate_said)
         started = time.perf_counter()
-        try:
-            result = await self._call(user_turn)
-        except (APIError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            log.warning("interview turn failed for %s: %s", self._profile.interview_id, exc)
+        if not self._client:
             result = self._fallback(candidate_said)
+        else:
+            try:
+                result = await self._call(user_turn)
+            except (APIError, GroqAPIError, KeyError, TypeError, ValueError, json.JSONDecodeError, Exception) as exc:
+                log.warning("interview turn failed for %s: %s", self._profile.interview_id, exc)
+                result = self._fallback(candidate_said)
 
         elapsed_ms = (time.perf_counter() - started) * 1000
         if elapsed_ms > settings.turn_budget_ms:
@@ -74,14 +88,59 @@ class InterviewTurnEngine:
         return result
 
     async def _call(self, user_turn: str) -> dict[str, Any]:
-        response = await self._client.messages.create(
-            model=settings.model,
-            max_tokens=900,
-            system=[{"type": "text", "text": self._system, "cache_control": {"type": "ephemeral"}}],
-            messages=self._history + [{"role": "user", "content": user_turn}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": TURN_SCHEMA}},
-        )
-        return json.loads(next(block.text for block in response.content if block.type == "text"))
+        if self._use_groq:
+            schema_instruction = (
+                "\n\nYou MUST respond ONLY with a valid JSON object matching this schema:\n"
+                "{\n"
+                '  "say": "string (the words to speak to candidate)",\n'
+                '  "ai_disclosed": boolean,\n'
+                '  "transcription_consent": boolean,\n'
+                '  "candidate_requested_stop": boolean,\n'
+                '  "answer_assessment": {\n'
+                '    "final": boolean,\n'
+                '    "score": integer (0 to 4),\n'
+                '    "evidence": "string",\n'
+                '    "rationale": "string"\n'
+                "  },\n"
+                '  "should_end_call": boolean\n'
+                "}"
+            )
+            messages = [
+                {"role": "system", "content": self._system + schema_instruction},
+                *self._history,
+                {"role": "user", "content": user_turn},
+            ]
+            response = await self._client.chat.completions.create(
+                model=settings.model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=900,
+            )
+            raw = response.choices[0].message.content or "{}"
+            data = json.loads(raw)
+            data.setdefault("say", "Thank you. Let's continue.")
+            data.setdefault("ai_disclosed", True)
+            data.setdefault("transcription_consent", self._profile.transcription_consent)
+            data.setdefault("candidate_requested_stop", False)
+            if "answer_assessment" not in data or not isinstance(data["answer_assessment"], dict):
+                data["answer_assessment"] = {"final": False, "score": 0, "evidence": "", "rationale": ""}
+            else:
+                data["answer_assessment"].setdefault("final", False)
+                data["answer_assessment"].setdefault("score", 0)
+                data["answer_assessment"].setdefault("evidence", "")
+                data["answer_assessment"].setdefault("rationale", "")
+            data.setdefault("should_end_call", False)
+            return data
+        else:
+            response = await self._client.messages.create(
+                model=settings.model,
+                max_tokens=900,
+                system=[{"type": "text", "text": self._system, "cache_control": {"type": "ephemeral"}}],
+                messages=self._history + [{"role": "user", "content": user_turn}],
+                output_config={"effort": "low", "format": {"type": "json_schema", "schema": TURN_SCHEMA}},
+            )
+            return json.loads(next(block.text for block in response.content if block.type == "text"))
 
     def _fallback(self, candidate_said: str = "") -> dict[str, Any]:
         import re

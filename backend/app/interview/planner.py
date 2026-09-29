@@ -9,6 +9,11 @@ from typing import Any
 
 from anthropic import APIError, AsyncAnthropic
 
+try:
+    from groq import AsyncGroq
+except ImportError:
+    AsyncGroq = None  # type: ignore[assignment]
+
 from ..config import settings
 from .models import InterviewPlan, Question
 from .resume import prompt_safe_resume
@@ -59,28 +64,54 @@ from 0.5 to 2.0. The output is a plan, not a hiring decision."""
 
 class InterviewPlanner:
     def __init__(self) -> None:
-        self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+        if settings.groq_api_key and AsyncGroq is not None:
+            self._use_groq = True
+            self._client = AsyncGroq(api_key=settings.groq_api_key)
+        else:
+            self._use_groq = False
+            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
 
     async def create(self, *, job_title: str, role_rubric: str, resume_text: str) -> InterviewPlan:
         """Return a validated LLM plan, with a safe local fallback if unavailable."""
         safe_resume = prompt_safe_resume(resume_text)
-        if not settings.anthropic_api_key:
+        if not settings.groq_api_key and not settings.anthropic_api_key:
             return fallback_plan(job_title, safe_resume)
 
         user_input = (
             f"Role title: {job_title}\n\n"
             f"Role requirements/rubric:\n{role_rubric or 'Use standard role-relevant competencies.'}\n\n"
-            f"Résumé evidence (personal details redacted where detected):\n{safe_resume}"
+            f"Résumé evidence (personal details redacted where detected):\n{safe_resume}\n\n"
+            "Return a valid JSON object matching this schema:\n"
+            "{\n"
+            '  "questions": [\n'
+            '    {"question_id": "string", "prompt": "string", "competency": "string", "rationale": "string", "weight": 1.0}\n'
+            "  ],\n"
+            '  "scoring_guidance": "string"\n'
+            "}"
         )
         try:
-            response = await self._client.messages.create(
-                model=settings.model,
-                max_tokens=1_500,
-                system=PLANNER_SYSTEM,
-                messages=[{"role": "user", "content": user_input}],
-                output_config={"format": {"type": "json_schema", "schema": PLAN_SCHEMA}},
-            )
-            output = json.loads(next(block.text for block in response.content if block.type == "text"))
+            if self._use_groq:
+                response = await self._client.chat.completions.create(
+                    model=settings.model,
+                    messages=[
+                        {"role": "system", "content": PLANNER_SYSTEM},
+                        {"role": "user", "content": user_input},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.2,
+                )
+                raw_text = response.choices[0].message.content or "{}"
+                output = json.loads(raw_text)
+            else:
+                response = await self._client.messages.create(
+                    model=settings.model,
+                    max_tokens=1_500,
+                    system=PLANNER_SYSTEM,
+                    messages=[{"role": "user", "content": user_input}],
+                    output_config={"format": {"type": "json_schema", "schema": PLAN_SCHEMA}},
+                )
+                output = json.loads(next(block.text for block in response.content if block.type == "text"))
+
             questions = tuple(Question.from_dict(item) for item in output["questions"])
             _validate_questions(questions)
             return InterviewPlan(
@@ -88,7 +119,7 @@ class InterviewPlanner:
                 questions=questions,
                 scoring_guidance=str(output["scoring_guidance"]),
             )
-        except (APIError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except Exception as exc:
             log.warning("question plan generation failed; using local fallback: %s", exc)
             return fallback_plan(job_title, safe_resume)
 

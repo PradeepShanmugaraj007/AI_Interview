@@ -81,6 +81,7 @@ class InterviewProfileTests(unittest.TestCase):
 
         profile = InterviewProfile("call-123", "cand-123", "int-123", PLAN)
         engine = InterviewTurnEngine(profile)
+        engine._client = None  # Verify deterministic fallback logic independently of external LLM
 
         # 1. Candidate says Yes to consent
         t1 = asyncio.run(engine.take_turn("Yes, I consent to being interviewed."))
