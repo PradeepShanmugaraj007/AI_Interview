@@ -1,0 +1,43 @@
+# Environment & Sensitive Credentials (CRITICAL: Never commit API keys)
+.env
+.env.*
+!.env.example
+*.env
+*.env.save
+backend/.env
+backend/.env.save
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+backend/.venv/
+
+# Local Storage, Database & Uploaded Resumes
+data/
+backend/data/
+*.sqlite3
+*.db
+*.db-journal
+
+# Operating System & Editors
+.DS_Store
+.DS_Store?
+._*
+.vscode/
+.idea/
+
+# Testing caches
+.pytest_cache/
+.coverage

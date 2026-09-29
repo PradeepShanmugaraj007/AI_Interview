@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Candidate interview</title>
+    <style>
+      :root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }
+      body { margin: 0; background: Canvas; color: CanvasText; }
+      main { max-width: 760px; margin: 48px auto; padding: 0 20px; }
+      h1 { margin-bottom: 8px; }
+      .lede { color: GrayText; margin-top: 0; }
+      form, #result { margin-top: 28px; display: grid; gap: 16px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      label { display: grid; gap: 7px; font-weight: 600; }
+      input, textarea, select, button { font: inherit; padding: 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, CanvasText 28%, Canvas); }
+      textarea { min-height: 112px; resize: vertical; }
+      .check { display: flex; align-items: start; gap: 9px; font-size: 0.92rem; font-weight: 400; }
+      .check input { margin-top: 3px; }
+      button { background: #146c43; color: white; border: 0; cursor: pointer; font-weight: 700; }
+      button:disabled { opacity: .55; cursor: not-allowed; }
+      #status { min-height: 1.4em; color: GrayText; }
+      #questions { margin: 0; padding-left: 22px; }
+      #questions li { margin: 8px 0; }
+      .notice { font-size: .9rem; color: GrayText; }
+      @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Candidate interview</h1>
+      <p class="lede">Upload a résumé, confirm consent, and place a tailored first-round AI interview call.</p>
+
+      <form id="candidate-form">
+        <div class="grid">
+          <label>Candidate name <input name="full_name" maxlength="120" required autocomplete="name"></label>
+          <label>Mobile number <input name="phone" required placeholder="+919876543210" inputmode="tel"></label>
+        </div>
+        <div class="grid">
+          <label>Role title <input name="job_title" maxlength="160" required placeholder="Backend engineer"></label>
+          <label>Candidate time zone <input id="timezone" name="timezone" required value="Asia/Kolkata"></label>
+        </div>
+        <label>Email (optional) <input name="email" type="email" maxlength="254" autocomplete="email"></label>
+        <label>Role requirements / evaluation rubric (optional)
+          <textarea name="role_rubric" maxlength="6000" placeholder="Required skills, seniority expectations, must-have experience, and job-relevant scoring criteria."></textarea>
+        </label>
+        <label>Résumé <input name="resume" type="file" accept=".pdf,.docx,.txt" required></label>
+        <label class="check"><input name="contact_consent" value="true" type="checkbox" required> I confirm the candidate has agreed to receive an automated interview call. They will also be asked for verbal transcription consent when the call begins.</label>
+        <button id="submit" type="submit">Prepare candidate interview</button>
+      </form>
+
+      <section id="result" hidden aria-live="polite">
+        <h2>Interview ready</h2>
+        <p id="candidate-summary"></p>
+        <ol id="questions"></ol>
+        <p class="notice">Scores are evidence for recruiter review; they are not an automatic hiring decision.</p>
+        <button id="call" type="button">Place interview call</button>
+      </section>
+      <p id="status" role="status"></p>
+    </main>
+    <script>
+      const form = document.querySelector('#candidate-form');
+      const status = document.querySelector('#status');
+      const result = document.querySelector('#result');
+      const submit = document.querySelector('#submit');
+      const call = document.querySelector('#call');
+      let candidateId;
+
+      const detectedZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (detectedZone) document.querySelector('#timezone').value = detectedZone;
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        status.textContent = 'Reading résumé and saving candidate…';
+        result.hidden = true;
+        try {
+          const response = await fetch('/candidates', { method: 'POST', body: new FormData(form) });
+          const body = await response.json();
+          if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Candidate could not be saved.');
+          candidateId = body.id;
+          document.querySelector('#candidate-summary').textContent = `${body.full_name} · ${body.job_title} · mobile ending ${body.phone_last_four}`;
+          document.querySelector('#questions').replaceChildren();
+          result.hidden = false;
+          status.textContent = 'Candidate saved. Questions will be generated when you place the call.';
+        } catch (error) {
+          status.textContent = error.message;
+        } finally {
+          submit.disabled = false;
+        }
+      });
+
+      call.addEventListener('click', async () => {
+        call.disabled = true;
+        status.textContent = 'Creating tailored questions and placing the call…';
+        try {
+          const response = await fetch(`/candidates/${candidateId}/interviews`, { method: 'POST' });
+          const body = await response.json();
+          if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'The interview call could not be placed.');
+          const questions = document.querySelector('#questions');
+          questions.replaceChildren(...body.plan.questions.map((question) => {
+            const item = document.createElement('li');
+            item.textContent = question.prompt;
+            return item;
+          }));
+          status.textContent = `Call placed. Interview status: ${body.status}.`;
+        } catch (error) {
+          status.textContent = error.message;
+          call.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
