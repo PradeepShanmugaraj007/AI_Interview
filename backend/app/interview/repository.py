@@ -268,6 +268,74 @@ class InterviewRepository:
                 row = connection.execute("SELECT * FROM interviews WHERE id = ?", (interview_id,)).fetchone()
             return _interview_dict(row) if row else None
 
+    def get_interview_by_call_sid(self, call_sid: str) -> dict[str, Any] | None:
+        if self._is_postgres and psycopg is not None:
+            with self._connect_postgres() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM interviews WHERE call_sid = %s ORDER BY created_at DESC LIMIT 1", (call_sid,))
+                    row = cur.fetchone()
+            return _normalize_interview_dict(row) if row else None
+        else:
+            with self._connect_sqlite() as connection:
+                row = connection.execute("SELECT * FROM interviews WHERE call_sid = ? ORDER BY created_at DESC LIMIT 1", (call_sid,)).fetchone()
+            return _interview_dict(row) if row else None
+
+    def get_active_interview_for_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        if self._is_postgres and psycopg is not None:
+            with self._connect_postgres() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM interviews WHERE candidate_id = %s AND status = 'in_progress' ORDER BY created_at DESC LIMIT 1",
+                        (candidate_id,),
+                    )
+                    row = cur.fetchone()
+            return _normalize_interview_dict(row) if row else None
+        else:
+            with self._connect_sqlite() as connection:
+                row = connection.execute(
+                    "SELECT * FROM interviews WHERE candidate_id = ? AND status = 'in_progress' ORDER BY created_at DESC LIMIT 1",
+                    (candidate_id,),
+                ).fetchone()
+            return _interview_dict(row) if row else None
+
+    def update_interview_status(
+        self,
+        interview_id: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        now = _now()
+        result_str = json.dumps(result) if result else None
+        if self._is_postgres and psycopg is not None:
+            with self._connect_postgres() as conn:
+                with conn.cursor() as cur:
+                    if result_str:
+                        cur.execute(
+                            """UPDATE interviews SET status = %s, result_json = %s, completed_at = %s
+                               WHERE id = %s""",
+                            (status, result_str, now, interview_id),
+                        )
+                    else:
+                        cur.execute(
+                            """UPDATE interviews SET status = %s, completed_at = %s
+                               WHERE id = %s""",
+                            (status, now, interview_id),
+                        )
+        else:
+            with self._connect_sqlite() as connection:
+                if result_str:
+                    connection.execute(
+                        """UPDATE interviews SET status = ?, result_json = ?, completed_at = ?
+                           WHERE id = ?""",
+                        (status, result_str, now, interview_id),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE interviews SET status = ?, completed_at = ?
+                           WHERE id = ?""",
+                        (status, now, interview_id),
+                    )
+
     def interview_context(self, interview_id: str) -> tuple[dict[str, Any], InterviewPlan] | None:
         interview = self.get_interview(interview_id)
         if not interview:
@@ -276,6 +344,114 @@ class InterviewRepository:
         if not candidate:
             return None
         return candidate, InterviewPlan.from_dict(interview["plan"])
+
+    def list_interviews_for_candidate(self, candidate_id: str) -> list[dict[str, Any]]:
+        if self._is_postgres and psycopg is not None:
+            with self._connect_postgres() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT * FROM interviews WHERE candidate_id = %s ORDER BY created_at DESC",
+                        (candidate_id,),
+                    )
+                    rows = cur.fetchall()
+            return [_normalize_interview_dict(dict(row)) for row in rows]
+        else:
+            with self._connect_sqlite() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM interviews WHERE candidate_id = ? ORDER BY created_at DESC",
+                    (candidate_id,),
+                ).fetchall()
+            return [_interview_dict(row) for row in rows]
+
+    def list_interviews(self, limit: int = 100) -> list[dict[str, Any]]:
+        if self._is_postgres and psycopg is not None:
+            with self._connect_postgres() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM interviews ORDER BY created_at DESC LIMIT %s", (limit,))
+                    rows = cur.fetchall()
+            return [_normalize_interview_dict(dict(row)) for row in rows]
+        else:
+            with self._connect_sqlite() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM interviews ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            return [_interview_dict(row) for row in rows]
+
+    def list_candidates_crm(self) -> list[dict[str, Any]]:
+        candidates = self.list_candidates()
+        interviews = self.list_interviews(limit=500)
+
+        latest_by_candidate: dict[str, dict[str, Any]] = {}
+        for iv in interviews:
+            cid = iv["candidate_id"]
+            if cid not in latest_by_candidate:
+                latest_by_candidate[cid] = iv
+
+        results = []
+        for c in candidates:
+            iv = latest_by_candidate.get(c["id"])
+            latest_info = None
+            if iv:
+                res = iv.get("result") or {}
+                latest_info = {
+                    "id": iv["id"],
+                    "status": iv["status"],
+                    "score": res.get("overall_score"),
+                    "recommendation": res.get("recommendation"),
+                    "completed_at": iv.get("completed_at"),
+                    "started_at": iv.get("started_at"),
+                    "created_at": iv.get("created_at"),
+                }
+            results.append({
+                "id": c["id"],
+                "full_name": c["full_name"],
+                "phone": c["phone"],
+                "phone_last_four": c["phone"][-4:] if c.get("phone") else "",
+                "email": c.get("email", ""),
+                "job_title": c["job_title"],
+                "timezone": c["timezone"],
+                "contact_consent": c["contact_consent"],
+                "resume_filename": c.get("resume_filename", ""),
+                "created_at": c["created_at"],
+                "latest_interview": latest_info,
+            })
+        return results
+
+    def get_crm_stats(self) -> dict[str, Any]:
+        candidates = self.list_candidates()
+        interviews = self.list_interviews(limit=1000)
+
+        completed = [iv for iv in interviews if iv.get("status") == "completed"]
+        in_progress = [iv for iv in interviews if iv.get("status") == "in_progress"]
+
+        shortlisted = 0
+        review_needed = 0
+        scores: list[float] = []
+
+        for iv in completed:
+            res = iv.get("result") or {}
+            rec = res.get("recommendation")
+            score = res.get("overall_score")
+            if rec == "recommend_human_shortlist_review":
+                shortlisted += 1
+            elif rec == "recommend_human_review_before_rejecting":
+                review_needed += 1
+            if isinstance(score, (int, float)):
+                scores.append(float(score))
+
+        avg_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+        shortlist_rate = round((shortlisted / len(completed)) * 100, 1) if completed else 0.0
+
+        return {
+            "total_candidates": len(candidates),
+            "total_interviews": len(interviews),
+            "completed_interviews": len(completed),
+            "in_progress_interviews": len(in_progress),
+            "shortlisted_count": shortlisted,
+            "review_needed_count": review_needed,
+            "shortlist_rate": shortlist_rate,
+            "average_score": avg_score,
+        }
 
 
 def _candidate_dict(row: sqlite3.Row) -> dict[str, Any]:

@@ -7,3 +7,4 @@ twilio>=9.3
 python-multipart>=0.0.18
 pypdf>=5.0
 psycopg[binary]>=3.2
+aiofiles>=24.0

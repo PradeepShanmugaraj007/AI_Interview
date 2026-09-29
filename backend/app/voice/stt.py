@@ -22,7 +22,7 @@ DEEPGRAM_URL = (
     "wss://api.deepgram.com/v1/listen"
     "?encoding=mulaw&sample_rate=8000&channels=1"
     "&model=nova-2-phonecall"
-    "&interim_results=true&endpointing=300&punctuate=true"
+    "&interim_results=true&endpointing=1500&utterance_end_ms=1500&punctuate=true"
     # smart_format keeps numbers and emails readable, which matters because we
     # extract email addresses and headcounts straight out of the transcript.
     "&smart_format=true"
@@ -37,6 +37,7 @@ class Transcriber:
         self._finals: asyncio.Queue[str] = asyncio.Queue()
         self._on_speech_started = on_speech_started
         self._speaking = False
+        self._utterance_buffer: list[str] = []
 
     async def __aenter__(self) -> "Transcriber":
         self._ws = await websockets.connect(
@@ -60,30 +61,55 @@ class Transcriber:
         while True:
             yield await self._finals.get()
 
+    async def _emit_utterance(self) -> None:
+        """Combine all accumulated is_final sentences into one complete answer."""
+        if not self._utterance_buffer:
+            return
+        full_text = " ".join(self._utterance_buffer).strip()
+        self._utterance_buffer.clear()
+        if full_text:
+            log.info("STT completed full candidate utterance: %s", full_text)
+            await self._finals.put(full_text)
+
     async def _read(self) -> None:
         assert self._ws
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
-                if msg.get("type") != "Results":
+                msg_type = msg.get("type")
+
+                # Handle UtteranceEnd event from Deepgram VAD
+                if msg_type == "UtteranceEnd":
+                    self._speaking = False
+                    await self._emit_utterance()
+                    continue
+
+                if msg_type != "Results":
                     continue
 
                 alt = msg["channel"]["alternatives"][0]
                 text = alt.get("transcript", "").strip()
-                if not text:
-                    continue
 
-                # Interim with content == candidate is talking. This is the
-                # barge-in trigger; it fires well before is_final.
-                if not self._speaking:
+                is_final = msg.get("is_final", False)
+                speech_final = msg.get("speech_final", False)
+
+                # Interim with content == candidate is talking. Barge-in trigger.
+                if text and not self._speaking:
                     self._speaking = True
                     if self._on_speech_started:
                         self._on_speech_started()
 
-                if msg.get("is_final") and msg.get("speech_final"):
+                if is_final and text:
+                    # Accumulate all finalized chunks into the utterance buffer
+                    if not self._utterance_buffer or self._utterance_buffer[-1] != text:
+                        self._utterance_buffer.append(text)
+
+                if speech_final:
                     self._speaking = False
-                    await self._finals.put(text)
+                    await self._emit_utterance()
+
         except asyncio.CancelledError:
+            await self._emit_utterance()
             raise
         except Exception as exc:  # noqa: BLE001 - never kill the call on STT error
             log.error("deepgram reader died: %s", exc)

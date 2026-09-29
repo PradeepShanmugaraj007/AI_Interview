@@ -125,8 +125,22 @@ class InterviewTurnEngine:
                 "_degraded": True,
             }
 
-        # If consent is active, progress through questions
-        if len(text) > 8:
+        # Handle audio check / conversational check-ins without advancing question
+        if re.search(r"\b(hello|can you hear me|are you there|wait|hold on|one second|excuse me)\b", text):
+            active_q = self._profile.active_question
+            q_prompt = f" The question is: {active_q.prompt}" if active_q else ""
+            return {
+                "say": f"Yes, I can hear you clearly! Take your time.{q_prompt}",
+                "ai_disclosed": True,
+                "transcription_consent": True,
+                "candidate_requested_stop": False,
+                "answer_assessment": {"final": False, "score": 0, "evidence": "", "rationale": ""},
+                "should_end_call": False,
+                "_degraded": True,
+            }
+
+        # If consent is active, progress through questions when meaningful answer is given
+        if len(text) >= 12:
             active_q = self._profile.active_question
             next_idx = self._profile.active_question_index + 1
             if next_idx < len(self._profile.plan.questions):
