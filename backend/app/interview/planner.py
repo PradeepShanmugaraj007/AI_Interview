@@ -1,3 +1,4 @@
+
 """Create a small, job-relevant question plan before placing a call."""
 
 from __future__ import annotations
@@ -7,12 +8,17 @@ import logging
 import re
 from typing import Any
 
-from anthropic import APIError, AsyncAnthropic
+try:
+    from anthropic import APIError, AsyncAnthropic
+except ImportError:
+    APIError = Exception  # type: ignore[assignment]
+    AsyncAnthropic = None  # type: ignore[assignment]
 
 try:
-    from groq import AsyncGroq
+    from groq import AsyncGroq, APIError as GroqAPIError
 except ImportError:
     AsyncGroq = None  # type: ignore[assignment]
+    GroqAPIError = Exception  # type: ignore[assignment]
 
 from ..config import settings
 from .models import InterviewPlan, Question
@@ -66,10 +72,10 @@ class InterviewPlanner:
     def __init__(self) -> None:
         if settings.groq_api_key and AsyncGroq is not None:
             self._use_groq = True
-            self._client = AsyncGroq(api_key=settings.groq_api_key)
+            self._client = AsyncGroq(api_key=settings.groq_api_key, max_retries=1, timeout=12.0)
         else:
             self._use_groq = False
-            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if (settings.anthropic_api_key and AsyncAnthropic) else None
 
     async def create(self, *, job_title: str, role_rubric: str, resume_text: str) -> InterviewPlan:
         """Return a validated LLM plan, with a safe local fallback if unavailable."""

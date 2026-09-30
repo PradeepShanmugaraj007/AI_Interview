@@ -7,13 +7,18 @@ import logging
 import time
 from typing import Any
 
-from anthropic import APIError, AsyncAnthropic
+try:
+    from anthropic import APIError, AsyncAnthropic
+except ImportError:
+    APIError = Exception  # type: ignore[assignment]
+    AsyncAnthropic = None  # type: ignore[assignment]
 
 try:
-    from groq import AsyncGroq, APIError as GroqAPIError
+    from groq import AsyncGroq, APIError as GroqAPIError, RateLimitError as GroqRateLimitError
 except ImportError:
     AsyncGroq = None  # type: ignore[assignment]
     GroqAPIError = Exception  # type: ignore[assignment]
+    GroqRateLimitError = Exception  # type: ignore[assignment]
 
 from ..config import settings
 from . import prompts
@@ -54,10 +59,13 @@ class InterviewTurnEngine:
     def __init__(self, profile: InterviewProfile) -> None:
         if settings.groq_api_key and AsyncGroq is not None:
             self._use_groq = True
-            self._client = AsyncGroq(api_key=settings.groq_api_key)
+            # In live voice telephony, max_retries must be 0 and timeout <= 3.5s so that
+            # rate limits (429) or transient delays trigger instant local fallback instead of
+            # causing 25-50s of dead silence on the phone line.
+            self._client = AsyncGroq(api_key=settings.groq_api_key, max_retries=0, timeout=3.5)
         else:
             self._use_groq = False
-            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key) if (settings.anthropic_api_key and AsyncAnthropic) else None
         self._profile = profile
         self._system = prompts.system_prompt(profile)
         self._history: list[dict[str, str]] = []
@@ -70,18 +78,21 @@ class InterviewTurnEngine:
         else:
             try:
                 result = await self._call(user_turn)
-            except (APIError, GroqAPIError, KeyError, TypeError, ValueError, json.JSONDecodeError, Exception) as exc:
-                log.warning("interview turn failed for %s: %s", self._profile.interview_id, exc)
+            except (APIError, GroqAPIError, GroqRateLimitError, KeyError, TypeError, ValueError, json.JSONDecodeError, Exception) as exc:
+                log.warning("interview turn failed for %s: %s; using instant fallback", self._profile.interview_id, exc)
                 result = self._fallback(candidate_said)
 
         elapsed_ms = (time.perf_counter() - started) * 1000
         if elapsed_ms > settings.turn_budget_ms:
             log.warning("interview turn over budget: %.0fms", elapsed_ms)
         self._profile.apply(result, candidate_said)
+
+        # Store concise conversational turns instead of entire prompt instructions.
+        # This prevents token explosion per minute (TPM) on Groq/Anthropic.
         self._history.extend(
             [
-                {"role": "user", "content": user_turn},
-                {"role": "assistant", "content": json.dumps(result)},
+                {"role": "user", "content": f'Candidate: "{candidate_said}"'},
+                {"role": "assistant", "content": str(result.get("say", ""))},
             ]
         )
         result["_latency_ms"] = elapsed_ms
@@ -105,9 +116,11 @@ class InterviewTurnEngine:
                 '  "should_end_call": boolean\n'
                 "}"
             )
+            # Only send the latest 4 conversational exchanges to stay well under TPM limits
+            recent_history = self._history[-4:]
             messages = [
                 {"role": "system", "content": self._system + schema_instruction},
-                *self._history,
+                *recent_history,
                 {"role": "user", "content": user_turn},
             ]
             response = await self._client.chat.completions.create(
@@ -115,7 +128,7 @@ class InterviewTurnEngine:
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
-                max_tokens=900,
+                max_tokens=600,
             )
             raw = response.choices[0].message.content or "{}"
             data = json.loads(raw)
@@ -133,11 +146,12 @@ class InterviewTurnEngine:
             data.setdefault("should_end_call", False)
             return data
         else:
+            recent_history = self._history[-4:]
             response = await self._client.messages.create(
                 model=settings.model,
-                max_tokens=900,
+                max_tokens=600,
                 system=[{"type": "text", "text": self._system, "cache_control": {"type": "ephemeral"}}],
-                messages=self._history + [{"role": "user", "content": user_turn}],
+                messages=recent_history + [{"role": "user", "content": user_turn}],
                 output_config={"effort": "low", "format": {"type": "json_schema", "schema": TURN_SCHEMA}},
             )
             return json.loads(next(block.text for block in response.content if block.type == "text"))
